@@ -220,13 +220,18 @@ end
 local Public = { }
 Public.__index = Public
 
-function Public.DynamicPool(size_cap : number)
+function Public.DynamicPool(size_cap : number): Pool
     return DynamicPool.New(size_cap)
 end
 
-function Public.StaticPool(size : number)
+function Public.StaticPool(size : number): Pool
     return StaticPool.New(size)
 end
+
+export type Pool = {
+    Spawn: (self : Pool, fn : (...any) -> (), ...) -> (),
+    Destroy: (self : Pool) -> ()
+}
 
 return Public
 
