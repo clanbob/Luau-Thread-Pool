@@ -194,7 +194,7 @@ function StaticPool:Spawn(fn, ...)
     task.spawn(idle_thread, fn, ...)
 end
 
-function StaticPool:Destroy(cancel_all_threads : boolean)
+function StaticPool:Destroy()
     local function clean()
         self.event_handler_queue:Destroy()       
         self.threads:Destroy()
@@ -202,17 +202,6 @@ function StaticPool:Destroy(cancel_all_threads : boolean)
         table.clear(self)
         setmetatable(self, nil)
         self = nil
-    end
-
-    if cancel_all_threads then
-        local thread = self.threads:Dequeue()
-        while thread do
-            task.cancel(thread)
-            thread = self.threads:Dequeue()
-        end
-        
-        clean()
-        return
     end
 
     -- NOTE: we spawn a thread, inside of the thread pool itself
