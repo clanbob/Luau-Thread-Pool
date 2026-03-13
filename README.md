@@ -50,9 +50,8 @@ local pool = ThreadPool.StaticPool(size)
   - Runs immediately on an idle worker when available.
   - If all workers are busy, enqueues the task for later execution.
 
-- `pool:Destroy(cancelAllThreads: boolean)`
-  - `true`: cancels idle worker coroutines immediately and cleans pool state.
-  - `false`/`nil`: schedules deferred cleanup after queued work has been processed.
+- `pool:Destroy()`
+  - Destroys the pool object.
 
 ---
 
@@ -88,7 +87,7 @@ for i = 1, 20 do
 end
 
 -- graceful cleanup (lets queued work drain)
-pool:Destroy(false)
+pool:Destroy()
 ```
 
 ## Notes
