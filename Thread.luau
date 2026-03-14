@@ -44,14 +44,6 @@ function Queue:Destroy()
     table.clear(self.items)
 end
 
-function Queue:Find(item : any): boolean
-    for _, item_in_queue in pairs(self.items) do
-        if item_in_queue == item then return true end
-    end
-
-    return false
-end
-
 local function run_event_handler_in_worker_thread(fn, ...)
     local success, err = pcall(fn, ...)
 
