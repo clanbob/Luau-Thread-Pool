@@ -42,6 +42,10 @@ end
 
 function Queue:Destroy()
     table.clear(self.items)
+
+    self.first = 1
+    self.last = 1
+    self.size = 0
 end
 
 local function run_event_handler_in_worker_thread(fn, ...)
@@ -77,7 +81,7 @@ function DynamicPool:_RunOverLoad(fn, ...)
     local cached_overload_runner = self.overload_thread
     self.overload_thread = nil
 
-    fn(...)
+    run_event_handler_in_worker_thread(fn, ...)
     self.overload_thread = cached_overload_runner
 end
 
@@ -117,6 +121,10 @@ function DynamicPool:Reconcile()
     end
 end
 
+function DynamicPool:GetCurrentSize()
+    return self.current_size
+end
+
 -- adjusts the size cap of the pool, if the new size cap is smaller than the current size
 -- then it will remove the excess threads from the pool
 function DynamicPool:AdjustSizeCap(new_size_cap : number)
@@ -142,7 +150,8 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
     end
 end
 
-function DynamicPool:Spawn(fn, ...)
+-- dips from the pool first then overflows into the overload thread
+function DynamicPool:SpawnFromPool(fn, ...)
     if self.size_cap > 0 then
         local thread = self.threads:Dequeue()
         if thread then
@@ -173,6 +182,33 @@ function DynamicPool:Spawn(fn, ...)
     end
 
     task.spawn(self.overload_thread, fn, ...)
+end
+
+-- uses the overloaded thread first then dips into the pool
+-- if the overload thread is busy
+function DynamicPool:Spawn(fn, ...)
+    local runner_thread
+
+    if not self.overload_thread then
+        local thread = self.threads:Dequeue()
+
+        if thread then
+            runner_thread = thread
+        elseif self.size_cap > self.current_size then
+            local new_thread = self:_CreateWorker()
+            coroutine.resume(new_thread)
+            
+            self.current_size += 1
+            runner_thread = new_thread
+        else
+            self.overload_thread = self:_CreateOverLoadThread()
+            coroutine.resume(self.overload_thread)
+
+            runner_thread = self.overload_thread
+        end   
+    end
+    
+    task.spawn(runner_thread, fn, ...)
 end
 
 function DynamicPool:Destroy()
@@ -240,6 +276,9 @@ function StaticPool:Spawn(fn, ...)
 end
 
 function StaticPool:Destroy()
+    if self.destroyed then return end
+    self.destroyed = true
+
     local function clean()
         self.event_handler_queue:Destroy()       
         self.threads:Destroy()
@@ -253,13 +292,6 @@ function StaticPool:Destroy()
     -- to ensure that all the event handlers have ran before we 
     -- destroy the pool
     self:Spawn(clean)
-
-    -- NOTE: if self is return to us without being nil, then the
-    -- destroy thread has yielded, during that window we mark the pool 
-    -- as destroyed, so that no more event handlers can be spawned
-    if self then
-        self.destroyed = true
-    end
 end
 
 local Public = { }
@@ -292,4 +324,3 @@ export type DynamicPool = Pool & {
 }
 
 return Public
-
