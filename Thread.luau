@@ -117,7 +117,11 @@ function DynamicPool:Reconcile()
 
     local difference = self.size_cap - self.current_size
     for i = 1, difference do
-        self.threads:Enqueue(self:_CreateWorker())
+        local thread = self:_CreateWorker()
+        coroutine.resume(thread)
+
+        self.threads:Enqueue(thread)
+        self.current_size += 1
     end
 end
 
@@ -125,7 +129,7 @@ end
 -- then it will remove the excess threads from the pool
 function DynamicPool:AdjustSizeCap(new_size_cap : number)
     if new_size_cap < 0 then error("Size cap must be greater than or equal 0") end
-    if new == self.size_cap then return end
+    if new_size_cap == self.size_cap then return end
 
     local old = self.size_cap
     self.size_cap = new_size_cap
@@ -133,7 +137,7 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
     local difference = self.current_size - self.size_cap
     if difference > 0 then
         if self.threads.size >= difference then
-            for _, difference do
+            for i = 1, difference do
                 self.threads:Dequeue()
             end
 
