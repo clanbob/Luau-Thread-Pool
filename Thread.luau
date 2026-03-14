@@ -69,6 +69,13 @@ function DynamicPool:_CreateWorker()
             run_event_handler_in_worker_thread(coroutine.yield())
             if not self.threads then return end -- checks if the pool is destroyed
             
+            -- NOTE: we can kill threads if the size cap if reduced while they are running,
+            -- we might not have removed all the threads yet because they arent in the queue
+            if self.current_size > self.size_cap then
+                self.current_size -= 1
+                return
+            end
+
             self.threads:Enqueue(coroutine.running())
         end
     end)
@@ -91,6 +98,8 @@ function DynamicPool:_CreateOverLoadThread()
 end
 
 function DynamicPool.New(size_cap : number)
+    if size_cap < 0 then error("Size cap must be greater than or equal 0") end
+
     return setmetatable({
         threads = Queue.New(),
 
@@ -101,27 +110,66 @@ function DynamicPool.New(size_cap : number)
     }, DynamicPool)
 end
 
-function DynamicPool:Spawn(fn, ...)
-    local thread = self.threads:Dequeue()
-    if thread then
-        task.spawn(thread, fn, ...)
-        
+-- fills the pool with threads up to the cap
+function DynamicPool:Reconcile()
+    if self.size_cap <= 0 then return end
+    if self.current_size >= self.size_cap then return end
 
-        if self.overload_thread then
-            self.overload_thread = nil
+    local difference = self.size_cap - self.current_size
+    for i = 1, difference do
+        self.threads:Enqueue(self:_CreateWorker())
+    end
+end
+
+-- adjusts the size cap of the pool, if the new size cap is smaller than the current size
+-- then it will remove the excess threads from the pool
+function DynamicPool:AdjustSizeCap(new_size_cap : number)
+    if new_size_cap < 0 then error("Size cap must be greater than or equal 0") end
+    if new == self.size_cap then return end
+
+    local old = self.size_cap
+    self.size_cap = new_size_cap
+
+    local difference = self.current_size - self.size_cap
+    if difference > 0 then
+        if self.threads.size >= difference then
+            for _, difference do
+                self.threads:Dequeue()
+            end
+
+            self.current_size -= difference
+        else
+            self.current_size -= self.threads.size
+            for i = 1, self.threads.size do
+                self.threads:Dequeue()
+            end
+        end
+    end
+end
+
+function DynamicPool:Spawn(fn, ...)
+    if self.size_cap > 0 then
+        local thread = self.threads:Dequeue()
+        if thread then
+            task.spawn(thread, fn, ...)
+            
+
+            if self.overload_thread then
+                self.overload_thread = nil
+            end
+
+            return
         end
 
-        return
-    end
+        if self.size_cap > self.current_size then
+            local new_thread = self:_CreateWorker()
 
-    if self.size_cap > self.current_size then
-        local new_thread = self:_CreateWorker()
-
-        coroutine.resume(new_thread)
-        task.spawn(new_thread, fn, ...)
-        
-        self.current_size += 1
-        return
+            coroutine.resume(new_thread)
+            task.spawn(new_thread, fn, ...)
+            
+            self.current_size += 1
+            return
+        end
     end
 
     if not self.overload_thread then
@@ -161,6 +209,8 @@ function StaticPool:_CreateWorker(): thread
 end
 
 function StaticPool.New(size : number)
+    if size <= 0 then error("Size must be greater than 0") end
+
     local self = setmetatable({
         event_handler_queue = Queue.New(),
         threads = Queue.New(),
@@ -220,7 +270,7 @@ end
 local Public = { }
 Public.__index = Public
 
-function Public.DynamicPool(size_cap : number): Pool
+function Public.DynamicPool(size_cap : number): DynamicPool
     return DynamicPool.New(size_cap)
 end
 
@@ -231,6 +281,11 @@ end
 export type Pool = {
     Spawn: (self : Pool, fn : (...any) -> (), ...) -> (),
     Destroy: (self : Pool) -> ()
+}
+
+export type DynamicPool = Pool & {
+    AdjustSizeCap: (self : DynamicPool, new_size_cap : number) -> ()
+    Reconcile: (self : DynamicPool) -> ()
 }
 
 return Public
