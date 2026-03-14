@@ -277,7 +277,6 @@ export type Queue = {
     Enqueue: (self : Queue, item : any) -> any,
     Dequeue: (self : Queue) -> any,
     Destroy: (self : Queue) -> (),
-    Find: (self : Queue, item : any) -> boolean,
 
     size : number
 }
@@ -288,10 +287,9 @@ export type Pool = {
 }
 
 export type DynamicPool = Pool & {
-    AdjustSizeCap: (self : DynamicPool, new_size_cap : number) -> ()
+    AdjustSizeCap: (self : DynamicPool, new_size_cap : number) -> (),
     Reconcile: (self : DynamicPool) -> ()
 }
 
 return Public
-
 
