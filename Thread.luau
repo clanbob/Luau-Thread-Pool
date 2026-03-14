@@ -143,7 +143,9 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
             self.current_size -= difference
         else
             self.current_size -= self.threads.size
-            for i = 1, self.threads.size do
+
+            local queue_size = self.threads.size
+            for i = 1, queue_size do
                 self.threads:Dequeue()
             end
         end
@@ -187,7 +189,7 @@ end
 -- uses the overloaded thread first then dips into the pool
 -- if the overload thread is busy
 function DynamicPool:Spawn(fn, ...)
-    local runner_thread
+    local runner_thread: thread
 
     if not self.overload_thread then
         local thread = self.threads:Dequeue()
@@ -205,7 +207,9 @@ function DynamicPool:Spawn(fn, ...)
             coroutine.resume(self.overload_thread)
 
             runner_thread = self.overload_thread
-        end   
+        end
+    else
+        runner_thread = self.overload_thread   
     end
     
     task.spawn(runner_thread, fn, ...)
@@ -285,7 +289,6 @@ function StaticPool:Destroy()
 
         table.clear(self)
         setmetatable(self, nil)
-        self = nil
     end
 
     -- NOTE: we spawn a thread, inside of the thread pool itself
@@ -321,6 +324,8 @@ export type Pool = {
 export type DynamicPool = Pool & {
     AdjustSizeCap: (self : DynamicPool, new_size_cap : number) -> (),
     Reconcile: (self : DynamicPool) -> ()
+    SpawnFromPool: (self : DynamicPool, fn : (...any) -> (), ...) -> (),
+    GetCurrentSize: (self : DynamicPool) -> number
 }
 
 return Public
