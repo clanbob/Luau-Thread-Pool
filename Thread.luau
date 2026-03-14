@@ -59,6 +59,44 @@ end
 local DynamicPool = { }
 DynamicPool.__index = DynamicPool
 
+function DynamicPool:AdjustIdleTime(new_idle_time : number)
+    if new_idle_time < 0 then error("Idle time must be greater than or equal 0") end
+    if new_idle_time == self.idle_time then return end
+
+    self.idle_time = new_idle_time
+
+    if not self.is_auditing then
+        self:_ScheduleWorkerAudit()
+    end
+end
+
+function DynamicPool:_ScheduleWorkerAudit()
+    if self.idle_time <= 0 then return end
+
+    self.is_auditing = true
+    task.spawn(function()
+        while self.threads do
+            task.wait(self.idle_time)
+            if not self.threads then return end
+
+            local time_snice_start = os.clock()
+
+            if time_snice_start - self.last_overflow_time >= self.idle_time then
+                if self.threads.size > 0 then
+                    self.threads:Dequeue()
+                    self.current_size -= 1
+                end
+            end
+
+            if self.overload_thread then
+                if time_snice_start - self.used_overload_thread_time >= self.idle_time then
+                    self.overload_thread = nil
+                end
+            end
+        end
+    end)
+end
+
 function DynamicPool:_CreateWorker()
     return coroutine.create(function()
         while true do
@@ -93,17 +131,26 @@ function DynamicPool:_CreateOverLoadThread()
     end)
 end
 
-function DynamicPool.New(size_cap : number)
+function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
     if size_cap < 0 then error("Size cap must be greater than or equal 0") end
 
-    return setmetatable({
+    local self = setmetatable({
         threads = Queue.New(),
 
         overload_thread = nil,
         size_cap = size_cap,
 
+
+        idle_time = idle_time or 0,
+        last_overflow_time = os.clock(),
+        used_overload_thread_time = os.clock(),
+        is_auditing = false,
+
         current_size = 0,
     }, DynamicPool)
+
+    self:_ScheduleWorkerAudit()
+    return self
 end
 
 -- fills the pool with threads up to the cap
@@ -158,12 +205,6 @@ function DynamicPool:SpawnFromPool(fn, ...)
         local thread = self.threads:Dequeue()
         if thread then
             task.spawn(thread, fn, ...)
-            
-
-            if self.overload_thread then
-                self.overload_thread = nil
-            end
-
             return
         end
 
@@ -174,6 +215,8 @@ function DynamicPool:SpawnFromPool(fn, ...)
             task.spawn(new_thread, fn, ...)
             
             self.current_size += 1
+
+            self.last_overflow_time = os.clock()
             return
         end
     end
@@ -184,6 +227,9 @@ function DynamicPool:SpawnFromPool(fn, ...)
     end
 
     task.spawn(self.overload_thread, fn, ...)
+
+    self.last_overflow_time = os.clock()
+    self.used_overload_thread_time = os.clock()
 end
 
 -- uses the overloaded thread first then dips into the pool
@@ -202,14 +248,22 @@ function DynamicPool:Spawn(fn, ...)
             
             self.current_size += 1
             runner_thread = new_thread
+
+            self.last_overflow_time = os.clock()
         else
             self.overload_thread = self:_CreateOverLoadThread()
             coroutine.resume(self.overload_thread)
 
             runner_thread = self.overload_thread
+
+            self.last_overflow_time = os.clock()
         end
     else
         runner_thread = self.overload_thread   
+    end
+
+    if runner_thread == self.overload_thread then
+        self.used_overload_thread_time = os.clock()
     end
     
     task.spawn(runner_thread, fn, ...)
@@ -236,7 +290,7 @@ function StaticPool:_CreateWorker(): thread
                 run_event_handler_in_worker_thread(event_handler)
                 event_handler = self.event_handler_queue:Dequeue() 
             end
-            if self.destroyed then return end   
+            if self.destroyed or not self.threads then return end   
                 
             self.threads:Enqueue(coroutine.running())
         end
@@ -281,7 +335,6 @@ end
 
 function StaticPool:Destroy()
     if self.destroyed then return end
-    self.destroyed = true
 
     local function clean()
         self.event_handler_queue:Destroy()       
@@ -295,13 +348,20 @@ function StaticPool:Destroy()
     -- to ensure that all the event handlers have ran before we 
     -- destroy the pool
     self:Spawn(clean)
+
+    -- NOTE: if self is return to as that means the clean
+    -- thread has yielded, this flag prevents subsquent spawn 
+    -- calls durning that window until the object gets cleaned
+    if self then
+        self.destroyed = true
+    end
 end
 
 local Public = { }
 Public.__index = Public
 
-function Public.DynamicPool(size_cap : number): DynamicPool
-    return DynamicPool.New(size_cap)
+function Public.DynamicPool(size_cap : number, idle_time): DynamicPool
+    return DynamicPool.New(size_cap, idle_time)
 end
 
 function Public.StaticPool(size : number): Pool
@@ -326,6 +386,7 @@ export type DynamicPool = Pool & {
     Reconcile: (self : DynamicPool) -> ()
     SpawnFromPool: (self : DynamicPool, fn : (...any) -> (), ...) -> (),
     GetCurrentSize: (self : DynamicPool) -> number
+    AdjustIdleTime: (self : DynamicPool, new_idle_time : number) -> ()
 }
 
 return Public
