@@ -3,7 +3,7 @@
 local Queue = { }
 Queue.__index = Queue
 
-function Queue.New()
+function Queue.New(): Queue
     return setmetatable({
         items = {},
 
@@ -131,7 +131,6 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
     if new_size_cap < 0 then error("Size cap must be greater than or equal 0") end
     if new_size_cap == self.size_cap then return end
 
-    local old = self.size_cap
     self.size_cap = new_size_cap
 
     local difference = self.current_size - self.size_cap
@@ -281,6 +280,15 @@ end
 function Public.StaticPool(size : number): Pool
     return StaticPool.New(size)
 end
+
+export type Queue = {
+    Enqueue: (self : Queue, item : any) -> any,
+    Dequeue: (self : Queue) -> any,
+    Destroy: (self : Queue) -> (),
+    Find: (self : Queue, item : any) -> boolean,
+
+    size : number
+}
 
 export type Pool = {
     Spawn: (self : Pool, fn : (...any) -> (), ...) -> (),
