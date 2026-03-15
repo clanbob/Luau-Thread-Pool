@@ -181,8 +181,6 @@ function DynamicPool:Reconcile()
         self.threads:Enqueue(thread)
         self.current_size += 1
     end
-
-    self.threads_not_used_since_last_audit = self.threads.size
 end
 
 function DynamicPool:GetCurrentSize()
@@ -206,7 +204,8 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
 
             self.current_size -= difference
 
-            self.threads_not_used_since_last_audit = self.threads.size
+            self.threads_not_used_since_last_audit = 
+                math.clamp(self.threads_not_used_since_last_audit - difference, 0, self.size_cap)
         else
             self.current_size -= self.threads.size
 
