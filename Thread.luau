@@ -85,6 +85,11 @@ function DynamicPool:_ScheduleWorkerAudit()
     self.is_auditing = true
     task.spawn(function()
         while self.threads do
+            if self.idle_time <= 0 then
+                self.is_auditing = false
+                break 
+            end
+
             task.wait(self.idle_time)
             if not self.threads then return end
 
