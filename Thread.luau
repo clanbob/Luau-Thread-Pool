@@ -59,6 +59,15 @@ end
 local DynamicPool = { }
 DynamicPool.__index = DynamicPool
 
+function DynamicPool:_DetermineThreadPoolUsage()
+    if self.size_cap <= 0 then return  end
+    
+    local threads_not_in_use = self.threads.size
+    if threads_not_in_use < self.threads_not_used_since_last_audit then
+        self.threads_not_used_since_last_audit = threads_not_in_use
+    end
+end
+
 function DynamicPool:AdjustIdleTime(new_idle_time : number)
     if new_idle_time < 0 then error("Idle time must be greater than or equal 0") end
     if new_idle_time == self.idle_time then return end
@@ -81,18 +90,24 @@ function DynamicPool:_ScheduleWorkerAudit()
 
             local time_snice_start = os.clock()
 
-            if time_snice_start - self.last_overflow_time >= self.idle_time then
-                if self.threads.size > 0 then
-                    self.threads:Dequeue()
+            for i = 1, self.threads_not_used_since_last_audit do
+                local thread = self.threads:Dequeue()
+                if thread then
                     self.current_size -= 1
+                else
+                    break
                 end
             end
 
+            self.threads_not_used_since_last_audit = self.threads.size
+            
             if self.overload_thread then
                 if time_snice_start - self.used_overload_thread_time >= self.idle_time then
                     self.overload_thread = nil
                 end
             end
+
+            
         end
     end)
 end
@@ -142,7 +157,7 @@ function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
 
 
         idle_time = idle_time or 0,
-        last_overflow_time = os.clock(),
+        threads_not_used_since_last_audit = 0,
         used_overload_thread_time = os.clock(),
         is_auditing = false,
 
@@ -166,6 +181,8 @@ function DynamicPool:Reconcile()
         self.threads:Enqueue(thread)
         self.current_size += 1
     end
+
+    self.threads_not_used_since_last_audit = self.threads.size
 end
 
 function DynamicPool:GetCurrentSize()
@@ -188,6 +205,8 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
             end
 
             self.current_size -= difference
+
+            self.threads_not_used_since_last_audit = self.threads.size
         else
             self.current_size -= self.threads.size
 
@@ -195,6 +214,8 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
             for i = 1, queue_size do
                 self.threads:Dequeue()
             end
+
+            self.threads_not_used_since_last_audit = 0
         end
     end
 end
@@ -205,6 +226,8 @@ function DynamicPool:SpawnFromPool(fn, ...)
         local thread = self.threads:Dequeue()
         if thread then
             task.spawn(thread, fn, ...)
+
+            self:_DetermineThreadPoolUsage()
             return
         end
 
@@ -215,8 +238,6 @@ function DynamicPool:SpawnFromPool(fn, ...)
             task.spawn(new_thread, fn, ...)
             
             self.current_size += 1
-
-            self.last_overflow_time = os.clock()
             return
         end
     end
@@ -227,8 +248,6 @@ function DynamicPool:SpawnFromPool(fn, ...)
     end
 
     task.spawn(self.overload_thread, fn, ...)
-
-    self.last_overflow_time = os.clock()
     self.used_overload_thread_time = os.clock()
 end
 
@@ -242,21 +261,19 @@ function DynamicPool:Spawn(fn, ...)
 
         if thread then
             runner_thread = thread
+
+            self:_DetermineThreadPoolUsage()
         elseif self.size_cap > self.current_size then
             local new_thread = self:_CreateWorker()
             coroutine.resume(new_thread)
             
             self.current_size += 1
             runner_thread = new_thread
-
-            self.last_overflow_time = os.clock()
         else
             self.overload_thread = self:_CreateOverLoadThread()
             coroutine.resume(self.overload_thread)
 
             runner_thread = self.overload_thread
-
-            self.last_overflow_time = os.clock()
         end
     else
         runner_thread = self.overload_thread   
