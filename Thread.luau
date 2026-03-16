@@ -319,13 +319,20 @@ function StaticPool:_CreateWorker(): thread
 		while true do
 			run_event_handler_in_worker_thread(coroutine.yield())
 
+			if not self.threads then -- checks if destroyed
+				return
+			end
+
 			local event_handler = self.event_handler_queue:Dequeue()
 			while event_handler do
+				run_event_handler_in_worker_thread(event_handler)		
+				
+				if not self.event_handler_queue or not self.threads then -- checks if destroyed
+					return
+				end
 
-				run_event_handler_in_worker_thread(event_handler)
-				event_handler = self.event_handler_queue:Dequeue() 
+				event_handler = self.event_handler_queue:Dequeue()
 			end
-			if self.destroyed or not self.threads then return end   
 
 			self.threads:Enqueue(coroutine.running())
 		end
@@ -372,6 +379,7 @@ function StaticPool:Destroy()
 	if self.destroyed then return end
 
 	local function clean()
+		print(self.event_handler_queue.size)
 		self.event_handler_queue:Destroy()       
 		self.threads:Destroy()
 
