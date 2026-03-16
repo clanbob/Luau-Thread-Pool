@@ -165,6 +165,7 @@ function DynamicPool:_CreateOverLoadThread()
 end
 
 function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
+	if size_cap == nil then size_cap = 0 end
 	if size_cap < 0 then error("Size cap must be greater than or equal 0") end
 
 	local self = setmetatable({
