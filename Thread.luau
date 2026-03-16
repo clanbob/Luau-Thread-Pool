@@ -1,4 +1,17 @@
--- Queue System --
+--[[
+	THREAD
+
+	Purpose:
+		Thread pool:
+			- Dymanic pool: grows and removes thread based on usage
+			- Static pool: pre-allocates threads and reuses them, if pool is full it queues requests
+
+	Author:
+		TheRoyalDrew
+]]
+
+
+-- Queue --
 
 local Queue = { }
 Queue.__index = Queue
