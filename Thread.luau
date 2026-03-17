@@ -61,40 +61,6 @@ function Queue:Destroy()
 	self.size = 0
 end
 
--- Stack --
-
-local Stack = { }
-Stack.__index = Stack
-
-function Stack.New(): Stack
-	return setmetatable({
-		items = {},
-		size = 0
-	}, Stack)
-end
-
-function Stack:Push(item : any)
-	table.insert(self.items, item)
-	self.size = #self.items
-
-	return item
-end
-
-function Stack:Pop(): any
-	if self.size <= 0 then return end
-
-	local item = self.items[#self.items]
-	self.items[#self.items] = nil
-	self.size = #self.items
-
-	return item
-end
-
-function Stack:Destroy()
-	table.clear(self.items)
-	self.size = 0
-end
-
 local function run_event_handler_in_worker_thread(fn, ...)
 	local success, err = pcall(fn, ...)
 
@@ -143,7 +109,7 @@ function DynamicPool:_ScheduleWorkerAudit()
 			local time_snice_start = os.clock()
 
 			for i = 1, self.threads_not_used_since_last_audit do
-				local thread = self.threads:Pop()
+				local thread = self.threads:Dequeue()
 				if thread then
 					self.current_size -= 1
 				else
@@ -177,7 +143,7 @@ function DynamicPool:_CreateWorker()
 				return
 			end
 
-			self.threads:Push(coroutine.running())
+			self.threads:Enqueue(coroutine.running())
 		end
 	end)
 end
@@ -203,7 +169,7 @@ function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
 	if size_cap < 0 then error("Size cap must be greater than or equal 0") end
 
 	local self = setmetatable({
-		threads = Stack.New(),
+		threads = Queue.New(),
 
 		overload_thread = nil,
 		size_cap = size_cap,
@@ -231,7 +197,7 @@ function DynamicPool:Reconcile()
 		local thread = self:_CreateWorker()
 		coroutine.resume(thread)
 
-		self.threads:Push(thread)
+		self.threads:Enqueue(thread)
 		self.current_size += 1
 	end
 end
@@ -252,7 +218,7 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
 	if difference > 0 then
 		if self.threads.size >= difference then
 			for i = 1, difference do
-				self.threads:Pop()
+				self.threads:Dequeue()
 			end
 
 			self.current_size -= difference
@@ -264,7 +230,7 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
 
 			local queue_size = self.threads.size
 			for i = 1, queue_size do
-				self.threads:Pop()
+				self.threads:Dequeue()
 			end
 
 			self.threads_not_used_since_last_audit = 0
@@ -275,7 +241,7 @@ end
 -- dips from the pool first then overflows into the overload thread
 function DynamicPool:SpawnFromPool(fn, ...)
 	if self.size_cap > 0 then
-		local thread = self.threads:Pop()
+		local thread = self.threads:Dequeue()
 		if thread then
 			task.spawn(thread, fn, ...)
 
@@ -309,7 +275,7 @@ function DynamicPool:Spawn(fn, ...)
 	local runner_thread: thread
 
 	if not self.overload_thread then
-		local thread = self.threads:Pop()
+		local thread = self.threads:Dequeue()
 
 		if thread then
 			runner_thread = thread
@@ -368,7 +334,7 @@ function StaticPool:_CreateWorker(): thread
 				queued_task = self.event_handler_queue:Dequeue()
 			end
 
-			self.threads:Push(coroutine.running())
+			self.threads:Enqueue(coroutine.running())
 		end
 	end)
 end
@@ -378,14 +344,14 @@ function StaticPool.New(size : number)
 
 	local self = setmetatable({
 		event_handler_queue = Queue.New(),
-		threads = Stack.New(),
+		threads = Queue.New(),
 	}, StaticPool)
 
 	for i = 1, size do
 		local thread = self:_CreateWorker()
 
 		coroutine.resume(thread)
-		self.threads:Push(thread)
+		self.threads:Enqueue(thread)
 	end
 
 	return self
@@ -394,7 +360,7 @@ end
 function StaticPool:Spawn(fn, ...)
 	if self.destroyed then return end
 
-	local idle_thread = self.threads:Pop()
+	local idle_thread = self.threads:Dequeue()
 	if not idle_thread then
 		-- NOTE: enqueue the function and packed args directly to avoid
 		-- allocating one closure per queued spawn.
@@ -448,14 +414,6 @@ export type Queue = {
 	Enqueue: (self : Queue, item : any) -> any,
 	Dequeue: (self : Queue) -> any,
 	Destroy: (self : Queue) -> (),
-
-	size : number
-}
-
-export type Stack = {
-	Push: (self : Stack, item : any) -> any,
-	Pop: (self : Stack) -> any,
-	Destroy: (self : Stack) -> (),
 
 	size : number
 }
