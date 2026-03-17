@@ -11,7 +11,7 @@
 ]]
 
 
--- Queue --
+
 
 local coroutine_create = coroutine.create
 local coroutine_resume = coroutine.resume
@@ -27,6 +27,8 @@ local table_unpack = table.unpack
 
 local math_clamp = math.clamp
 local os_clock = os.clock
+
+-- Queue --
 
 local Queue = { }
 Queue.__index = Queue
