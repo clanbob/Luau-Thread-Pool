@@ -379,7 +379,6 @@ function StaticPool:Destroy()
 	if self.destroyed then return end
 
 	local function clean()
-		print(self.event_handler_queue.size)
 		self.event_handler_queue:Destroy()       
 		self.threads:Destroy()
 
