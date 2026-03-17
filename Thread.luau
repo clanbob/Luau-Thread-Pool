@@ -13,6 +13,21 @@
 
 -- Queue --
 
+local coroutine_create = coroutine.create
+local coroutine_resume = coroutine.resume
+local coroutine_running = coroutine.running
+local coroutine_yield = coroutine.yield
+
+local task_spawn = task.spawn
+local task_wait = task.wait
+
+local table_clear = table.clear
+local table_pack = table.pack
+local table_unpack = table.unpack
+
+local math_clamp = math.clamp
+local os_clock = os.clock
+
 local Queue = { }
 Queue.__index = Queue
 
@@ -54,11 +69,33 @@ function Queue:Dequeue(): any
 end
 
 function Queue:Destroy()
-	table.clear(self.items)
+	table_clear(self.items)
 
 	self.first = 1
 	self.last = 1
 	self.size = 0
+end
+
+function Queue:DropFront(amount: number): number
+	if amount <= 0 or self.size <= 0 then return 0 end
+
+	local removed = math.min(amount, self.size)
+	local first = self.first
+	local last_removed = first + removed - 1
+
+	for index = first, last_removed do
+		self.items[index] = nil
+	end
+
+	self.size -= removed
+	self.first = last_removed + 1
+
+	if self.size <= 0 then
+		self.first = 1
+		self.last = 1
+	end
+
+	return removed
 end
 
 local function run_event_handler_in_worker_thread(fn, ...)
@@ -96,26 +133,20 @@ function DynamicPool:_ScheduleWorkerAudit()
 	if self.idle_time <= 0 then return end
 
 	self.is_auditing = true
-	task.spawn(function()
+	task_spawn(function()
 		while self.threads do
 			if self.idle_time <= 0 then
 				self.is_auditing = false
 				break 
 			end
 
-			task.wait(self.idle_time)
+			task_wait(self.idle_time)
 			if not self.threads then return end
 
-			local time_snice_start = os.clock()
+			local time_snice_start = os_clock()
 
-			for i = 1, self.threads_not_used_since_last_audit do
-				local thread = self.threads:Dequeue()
-				if thread then
-					self.current_size -= 1
-				else
-					break
-				end
-			end
+			local removed = self.threads:DropFront(self.threads_not_used_since_last_audit)
+			self.current_size -= removed
 
 			self.threads_not_used_since_last_audit = self.threads.size
 
@@ -131,9 +162,9 @@ function DynamicPool:_ScheduleWorkerAudit()
 end
 
 function DynamicPool:_CreateWorker()
-	return coroutine.create(function()
+	return coroutine_create(function()
 		while true do
-			run_event_handler_in_worker_thread(coroutine.yield())
+			run_event_handler_in_worker_thread(coroutine_yield())
 			if not self.threads then return end -- checks if the pool is destroyed
 
 			-- NOTE: we can kill threads if the size cap if reduced while they are running,
@@ -143,7 +174,7 @@ function DynamicPool:_CreateWorker()
 				return
 			end
 
-			self.threads:Enqueue(coroutine.running())
+			self.threads:Enqueue(coroutine_running())
 		end
 	end)
 end
@@ -157,9 +188,9 @@ function DynamicPool:_RunOverLoad(fn, ...)
 end
 
 function DynamicPool:_CreateOverLoadThread()
-	return coroutine.create(function()
+	return coroutine_create(function()
 		while true do
-			self:_RunOverLoad(coroutine.yield())
+			self:_RunOverLoad(coroutine_yield())
 		end
 	end)
 end
@@ -177,7 +208,7 @@ function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
 
 		idle_time = idle_time or 0,
 		threads_not_used_since_last_audit = 0,
-		used_overload_thread_time = os.clock(),
+		used_overload_thread_time = os_clock(),
 		is_auditing = false,
 
 		current_size = 0,
@@ -195,7 +226,7 @@ function DynamicPool:Reconcile()
 	local difference = self.size_cap - self.current_size
 	for i = 1, difference do
 		local thread = self:_CreateWorker()
-		coroutine.resume(thread)
+		coroutine_resume(thread)
 
 		self.threads:Enqueue(thread)
 		self.current_size += 1
@@ -217,21 +248,15 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
 	local difference = self.current_size - self.size_cap
 	if difference > 0 then
 		if self.threads.size >= difference then
-			for i = 1, difference do
-				self.threads:Dequeue()
-			end
+			local removed = self.threads:DropFront(difference)
 
-			self.current_size -= difference
+			self.current_size -= removed
 
 			self.threads_not_used_since_last_audit = 
-				math.clamp(self.threads_not_used_since_last_audit - difference, 0, self.size_cap :: number)
+				math_clamp(self.threads_not_used_since_last_audit - removed, 0, self.size_cap :: number)
 		else
-			self.current_size -= self.threads.size
-
-			local queue_size = self.threads.size
-			for i = 1, queue_size do
-				self.threads:Dequeue()
-			end
+			local removed = self.threads:DropFront(self.threads.size)
+			self.current_size -= removed
 
 			self.threads_not_used_since_last_audit = 0
 		end
@@ -243,7 +268,7 @@ function DynamicPool:SpawnFromPool(fn, ...)
 	if self.size_cap > 0 then
 		local thread = self.threads:Dequeue()
 		if thread then
-			task.spawn(thread, fn, ...)
+			task_spawn(thread, fn, ...)
 
 			self:_DetermineThreadPoolUsage()
 			return
@@ -252,8 +277,8 @@ function DynamicPool:SpawnFromPool(fn, ...)
 		if self.size_cap > self.current_size then
 			local new_thread = self:_CreateWorker()
 
-			coroutine.resume(new_thread)
-			task.spawn(new_thread, fn, ...)
+			coroutine_resume(new_thread)
+			task_spawn(new_thread, fn, ...)
 
 			self.current_size += 1
 			return
@@ -262,11 +287,11 @@ function DynamicPool:SpawnFromPool(fn, ...)
 
 	if not self.overload_thread then
 		self.overload_thread = self:_CreateOverLoadThread()
-		coroutine.resume(self.overload_thread)
+		coroutine_resume(self.overload_thread)
 	end
 
-	task.spawn(self.overload_thread, fn, ...)
-	self.used_overload_thread_time = os.clock()
+	task_spawn(self.overload_thread, fn, ...)
+	self.used_overload_thread_time = os_clock()
 end
 
 -- uses the overloaded thread first then dips into the pool
@@ -283,13 +308,13 @@ function DynamicPool:Spawn(fn, ...)
 			self:_DetermineThreadPoolUsage()
 		elseif self.size_cap > self.current_size then
 			local new_thread = self:_CreateWorker()
-			coroutine.resume(new_thread)
+			coroutine_resume(new_thread)
 
 			self.current_size += 1
 			runner_thread = new_thread
 		else
 			self.overload_thread = self:_CreateOverLoadThread()
-			coroutine.resume(self.overload_thread)
+			coroutine_resume(self.overload_thread)
 
 			runner_thread = self.overload_thread
 		end
@@ -298,16 +323,16 @@ function DynamicPool:Spawn(fn, ...)
 	end
 
 	if runner_thread == self.overload_thread then
-		self.used_overload_thread_time = os.clock()
+		self.used_overload_thread_time = os_clock()
 	end
 
-	task.spawn(runner_thread, fn, ...)
+	task_spawn(runner_thread, fn, ...)
 end
 
 function DynamicPool:Destroy()
 	self.threads:Destroy()
 
-	table.clear(self)
+	table_clear(self)
 	setmetatable(self, nil)
 end
 
@@ -315,9 +340,9 @@ local StaticPool = { }
 StaticPool.__index = StaticPool
 
 function StaticPool:_CreateWorker(): thread
-	return coroutine.create(function()
+	return coroutine_create(function()
 		while true do
-			run_event_handler_in_worker_thread(coroutine.yield())
+			run_event_handler_in_worker_thread(coroutine_yield())
 
 			if not self.threads then -- checks if destroyed
 				return
@@ -325,7 +350,7 @@ function StaticPool:_CreateWorker(): thread
 
 			local queued_task = self.event_handler_queue:Dequeue()
 			while queued_task do
-				run_event_handler_in_worker_thread(queued_task.fn, table.unpack(queued_task.args, 1, queued_task.args.n))
+				run_event_handler_in_worker_thread(queued_task.fn, table_unpack(queued_task.args, 1, queued_task.args.n))
 				
 				if not self.event_handler_queue or not self.threads then -- checks if destroyed
 					return
@@ -334,7 +359,7 @@ function StaticPool:_CreateWorker(): thread
 				queued_task = self.event_handler_queue:Dequeue()
 			end
 
-			self.threads:Enqueue(coroutine.running())
+			self.threads:Enqueue(coroutine_running())
 		end
 	end)
 end
@@ -350,7 +375,7 @@ function StaticPool.New(size : number)
 	for i = 1, size do
 		local thread = self:_CreateWorker()
 
-		coroutine.resume(thread)
+		coroutine_resume(thread)
 		self.threads:Enqueue(thread)
 	end
 
@@ -366,13 +391,13 @@ function StaticPool:Spawn(fn, ...)
 		-- allocating one closure per queued spawn.
 		self.event_handler_queue:Enqueue({
 			fn = fn,
-			args = table.pack(...)
+			args = table_pack(...)
 		})
 
 		return 
 	end
 
-	task.spawn(idle_thread, fn, ...)
+	task_spawn(idle_thread, fn, ...)
 end
 
 function StaticPool:Destroy()
@@ -382,7 +407,7 @@ function StaticPool:Destroy()
 		self.event_handler_queue:Destroy()       
 		self.threads:Destroy()
 
-		table.clear(self)
+		table_clear(self)
 		setmetatable(self, nil)
 	end
 
