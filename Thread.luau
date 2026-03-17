@@ -323,15 +323,15 @@ function StaticPool:_CreateWorker(): thread
 				return
 			end
 
-			local event_handler = self.event_handler_queue:Dequeue()
-			while event_handler do
-				run_event_handler_in_worker_thread(event_handler)		
+			local queued_task = self.event_handler_queue:Dequeue()
+			while queued_task do
+				run_event_handler_in_worker_thread(queued_task.fn, table.unpack(queued_task.args, 1, queued_task.args.n))
 				
 				if not self.event_handler_queue or not self.threads then -- checks if destroyed
 					return
 				end
 
-				event_handler = self.event_handler_queue:Dequeue()
+				queued_task = self.event_handler_queue:Dequeue()
 			end
 
 			self.threads:Enqueue(coroutine.running())
@@ -362,12 +362,12 @@ function StaticPool:Spawn(fn, ...)
 
 	local idle_thread = self.threads:Dequeue()
 	if not idle_thread then
-		local args = table.pack(...)
-		-- NOTE: we enqueue functions which save the passed agruments
-		-- thus we can dirctly run it, by passing the funciton
-		self.event_handler_queue:Enqueue(function()
-			fn(table.unpack(args, 1, args.n))
-		end)
+		-- NOTE: enqueue the function and packed args directly to avoid
+		-- allocating one closure per queued spawn.
+		self.event_handler_queue:Enqueue({
+			fn = fn,
+			args = table.pack(...)
+		})
 
 		return 
 	end
