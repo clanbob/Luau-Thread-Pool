@@ -10,6 +10,7 @@ The module exports constructors for both pool types from `Thread.luau`.
 ## File
 
 - `Thread.luau` — full implementation and exported types.
+- Idle worker storage uses a LIFO stack internally, while pending static-pool event handlers remain FIFO in a queue.
 
 ## Setup
 
