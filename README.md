@@ -72,7 +72,7 @@ local pool = ThreadPool.StaticPool(size)
 
 - `pool:Spawn(fn, ...)`
   - Runs immediately on an idle worker if available.
-  - If all workers are busy, queues a closure that captures arguments and runs later.
+  - If all workers are busy, queues the function + packed arguments to run when a worker is free.
 
 - `pool:Destroy()`
   - Schedules cleanup through the pool so queued work can drain before object teardown.
@@ -118,8 +118,26 @@ pool:Destroy()
 
 ---
 
+## Error handling mode (`protect_threads`)
+
+Both pool types expose a mutable boolean field:
+
+- `pool.protect_threads` (default: `false`)
+
+Behavior:
+
+- `false` (default): task handlers run directly for maximum performance.
+- `true`: task handlers are wrapped in `pcall`; failures are reported via `warn` and the worker continues.
+
+```luau
+local dynamicPool = ThreadPool.DynamicPool(8, 10)
+dynamicPool.protect_threads = true
+
+local staticPool = ThreadPool.StaticPool(4)
+staticPool.protect_threads = true
+```
+
 ## Notes
 
-- Worker task execution is wrapped with `pcall`; runtime errors are emitted via `warn`.
 - `DynamicPool` with `sizeCap == 0` effectively routes all work through overload behavior.
 - This module is intended for Luau coroutine/task scheduling environments (for example, Roblox).
