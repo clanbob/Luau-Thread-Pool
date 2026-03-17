@@ -30,6 +30,21 @@ local os_clock = os.clock
 
 -- Queue --
 
+local coroutine_create = coroutine.create
+local coroutine_resume = coroutine.resume
+local coroutine_running = coroutine.running
+local coroutine_yield = coroutine.yield
+
+local task_spawn = task.spawn
+local task_wait = task.wait
+
+local table_clear = table.clear
+local table_pack = table.pack
+local table_unpack = table.unpack
+
+local math_clamp = math.clamp
+local os_clock = os.clock
+
 local Queue = { }
 Queue.__index = Queue
 
@@ -100,10 +115,14 @@ function Queue:DropFront(amount: number): number
 	return removed
 end
 
-local function run_event_handler_in_worker_thread(fn, ...)
-	local success, err = pcall(fn, ...)
+local function run_event_handler_in_worker_thread(pool, fn, ...)
+	if pool.protect_threads then
+		local success, err = pcall(fn, ...)
+		if not success then warn(`{err}`) end
+		return
+	end
 
-	if not success then warn(`{err}`) end
+	fn(...)
 end
 
 
@@ -166,7 +185,7 @@ end
 function DynamicPool:_CreateWorker()
 	return coroutine_create(function()
 		while true do
-			run_event_handler_in_worker_thread(coroutine_yield())
+			run_event_handler_in_worker_thread(self, coroutine_yield())
 			if not self.threads then return end -- checks if the pool is destroyed
 
 			-- NOTE: we can kill threads if the size cap if reduced while they are running,
@@ -185,7 +204,7 @@ function DynamicPool:_RunOverLoad(fn, ...)
 	local cached_overload_runner = self.overload_thread
 	self.overload_thread = nil
 
-	run_event_handler_in_worker_thread(fn, ...)
+	run_event_handler_in_worker_thread(self, fn, ...)
 	self.overload_thread = cached_overload_runner
 end
 
@@ -212,6 +231,7 @@ function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
 		threads_not_used_since_last_audit = 0,
 		used_overload_thread_time = os_clock(),
 		is_auditing = false,
+		protect_threads = false,
 
 		current_size = 0,
 	}, DynamicPool)
@@ -344,7 +364,7 @@ StaticPool.__index = StaticPool
 function StaticPool:_CreateWorker(): thread
 	return coroutine_create(function()
 		while true do
-			run_event_handler_in_worker_thread(coroutine_yield())
+			run_event_handler_in_worker_thread(self, coroutine_yield())
 
 			if not self.threads then -- checks if destroyed
 				return
@@ -352,8 +372,8 @@ function StaticPool:_CreateWorker(): thread
 
 			local queued_task = self.event_handler_queue:Dequeue()
 			while queued_task do
-				run_event_handler_in_worker_thread(queued_task.fn, table_unpack(queued_task.args, 1, queued_task.args.n))
-				
+				run_event_handler_in_worker_thread(self, queued_task.fn, table_unpack(queued_task.args, 1, queued_task.args.n))
+
 				if not self.event_handler_queue or not self.threads then -- checks if destroyed
 					return
 				end
@@ -372,6 +392,7 @@ function StaticPool.New(size : number)
 	local self = setmetatable({
 		event_handler_queue = Queue.New(),
 		threads = Queue.New(),
+		protect_threads = false,
 	}, StaticPool)
 
 	for i = 1, size do
@@ -447,7 +468,8 @@ export type Queue = {
 
 export type Pool = {
 	Spawn: (self : Pool, fn : (...any) -> (), ...any) -> (),
-	Destroy: (self : Pool) -> ()
+	Destroy: (self : Pool) -> (),
+	protect_threads: boolean
 }
 
 export type DynamicPool = Pool & {
