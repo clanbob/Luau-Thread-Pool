@@ -30,21 +30,6 @@ local os_clock = os.clock
 
 -- Queue --
 
-local coroutine_create = coroutine.create
-local coroutine_resume = coroutine.resume
-local coroutine_running = coroutine.running
-local coroutine_yield = coroutine.yield
-
-local task_spawn = task.spawn
-local task_wait = task.wait
-
-local table_clear = table.clear
-local table_pack = table.pack
-local table_unpack = table.unpack
-
-local math_clamp = math.clamp
-local os_clock = os.clock
-
 local Queue = { }
 Queue.__index = Queue
 
