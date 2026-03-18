@@ -417,6 +417,7 @@ function StaticPool:Destroy()
 
 		table_clear(self)
 		setmetatable(self, nil)
+		self = nil
 	end
 
 	-- NOTE: we spawn a thread, inside of the thread pool itself
@@ -424,7 +425,7 @@ function StaticPool:Destroy()
 	-- destroy the pool
 	self:Spawn(clean)
 
-	-- NOTE: if self is return to as that means the clean
+	-- NOTE: if self is return to us that means the clean
 	-- thread has yielded, this flag prevents subsquent spawn 
 	-- calls durning that window until the object gets cleaned
 	if self then
