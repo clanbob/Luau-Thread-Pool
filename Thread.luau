@@ -27,7 +27,7 @@ local table_insert = table.insert
 local task_spawn = task.spawn
 local task_wait = task.wait
 
-local DEFAULT_THREAD_POOL_SIZE_CAP = 16
+local DEFAULT_THREAD_POOL_SIZE_CAP = 999 -- set to 999 for unbound growth as default
 local DEFAULT_THREAD_POOL_IDLE_TIME = 30
 
 local Queue = {}
