@@ -6,6 +6,16 @@
 			- Dymanic pool: grows and removes thread based on usage
 			- Static pool: pre-allocates threads and reuses them, if pool is full it queues requests
 
+	Dynamic cancellation:
+		Capture worker = coroutine.running() and job_id = pool:GetWorkerJobId(worker)
+		while the callback is active. Later call pool:CancelWorker(worker, job_id).
+		Scope cleanup must call that method instead of directly cancelling the thread.
+		Spawn / SpawnFromPool also return worker, job_id (the job may already be done).
+		Passing job_id prevents stale cleanup from cancelling a reused worker's new job.
+		Cancellation must come from another thread while the worker is suspended.
+		With protect_threads=false, failed jobs are reaped by audits or ReapDeadWorkers().
+		StaticPool behavior is unchanged.
+
 	Author:
 		TheRoyalDrew
 ]]
@@ -13,22 +23,24 @@
 
 
 
-local coroutine_create = coroutine.create
-local coroutine_resume = coroutine.resume
-local coroutine_running = coroutine.running
-local coroutine_yield = coroutine.yield
+local coroutine_create = 	                                  coroutine.create
+local coroutine_resume = 	                 coroutine.resume
+local coroutine_running =   	coroutine.running
+local coroutine_yield = 	       coroutine.yield
 
-local task_spawn = task.spawn
-local task_wait = task.wait
+local task_spawn =  	task.spawn
+local task_wait = 	        task.wait
 
-local table_clear = table.clear
-local table_pack = table.pack
-local table_unpack = table.unpack
+local table_clear = 	           table.clear
+local table_pack =    	table.pack
+local table_unpack =	                 table.unpack
 
-local math_clamp = math.clamp
-local os_clock = os.clock
+local math_clamp = 	  math.clamp
+local os_clock = 	           os.clock
 
--- Queue --
+
+
+
 
 local Queue = { }
 Queue.__index = Queue
@@ -122,6 +134,11 @@ function DynamicPool:_DetermineThreadPoolUsage()
 	if threads_not_in_use < self.threads_not_used_since_last_audit then
 		self.threads_not_used_since_last_audit = threads_not_in_use
 	end
+
+
+	if self.current_size > 49 then
+		warn('[DynamicPool] thread leak possible, current size: '..self.current_size..', max size: '..self.size_cap, 'audit time: '..self.idle_time)
+	end
 end
 
 function DynamicPool:AdjustIdleTime(new_idle_time : number)
@@ -149,6 +166,7 @@ function DynamicPool:_ScheduleWorkerAudit()
 			task_wait(self.idle_time)
 			if not self.threads then return end
 
+			self:ReapDeadWorkers()
 			local time_snice_start = os_clock()
 
 			local removed = self.threads:DropFront(self.threads_not_used_since_last_audit)
@@ -161,10 +179,94 @@ function DynamicPool:_ScheduleWorkerAudit()
 					self.overload_thread = nil
 				end
 			end
-
-
 		end
 	end)
+end
+
+
+function DynamicPool:GetWorkerJobId(worker: thread): number?
+	if not self.active_workers then return nil end
+	return self.active_workers[worker] or self.active_overload_threads[worker]
+end
+
+-- NOTE: Cancels active regular or overload workers. Idle/foreign workers are rejected.
+-- expected_job_id only when the caller guarantees ownership of the current job.
+function DynamicPool:CancelWorker(worker: thread, expected_job_id: number?): (boolean, string?)
+	local regular_job = self.active_workers[worker]
+	local job_id = regular_job or self.active_overload_threads[worker]
+	
+	if not job_id then return false end
+	if expected_job_id ~= nil and expected_job_id ~= job_id then
+		return false
+	end
+
+	local status = coroutine.status(worker)
+	if status == "running" or status == "normal" then
+		return false
+	end
+
+	if status ~= "dead" then
+		local success, err = pcall(task.cancel, worker)
+		if not success then return false end
+	end
+
+	if regular_job then
+		self.active_workers[worker] = nil
+		self.current_size -= 1
+	else
+		self.active_overload_threads[worker] = nil
+	end
+
+	return true
+end
+
+-- NOTE: Unprotected callback errors or direct task.cancel calls bypass completion.
+function DynamicPool:AduitDeadWorkers(): number
+	if not self.active_workers then return 0 end
+	local removed = 0
+	for worker in self.active_workers do
+		if coroutine.status(worker) == "dead" then
+			self.active_workers[worker] = nil
+			self.current_size -= 1
+			removed += 1
+		end
+	end
+	
+	for worker in self.active_overload_threads do
+		if coroutine.status(worker) == "dead" then
+			self.active_overload_threads[worker] = nil
+			removed += 1
+		end
+	end
+	return removed
+end
+
+function DynamicPool:_TakeIdleWorker(): thread?
+	local worker = self.threads:Dequeue()
+	while worker do
+		if coroutine.status(worker :: thread) ~= "dead" then return worker end
+		-- Recover an idle worker that was cancelled outside this API.
+		self.current_size -= 1
+		worker = self.threads:Dequeue()
+	end
+	return nil
+end
+
+function DynamicPool:_StartWorker(worker: thread, is_overload: boolean, fn, ...)
+	self.next_job_id += 1
+	local job_id = self.next_job_id
+
+	if is_overload then
+		self.overload_thread = nil
+		self.active_overload_threads[worker] = job_id
+		self.used_overload_thread_time = os_clock()
+	else
+		self.active_workers[worker] = job_id
+	end
+
+	-- Register before task.spawn: the callback can immediately start another job.
+	task_spawn(worker, fn, ...)
+	return worker, job_id
 end
 
 function DynamicPool:_CreateWorker()
@@ -172,6 +274,7 @@ function DynamicPool:_CreateWorker()
 		while true do
 			run_event_handler_in_worker_thread(self, coroutine_yield())
 			if not self.threads then return end -- checks if the pool is destroyed
+			self.active_workers[coroutine_running()] = nil
 
 			-- NOTE: we can kill threads if the size cap if reduced while they are running,
 			-- we might not have removed all the threads yet because they arent in the queue
@@ -186,17 +289,19 @@ function DynamicPool:_CreateWorker()
 end
 
 function DynamicPool:_RunOverLoad(fn, ...)
-	local cached_overload_runner = self.overload_thread
-	self.overload_thread = nil
-
+	local worker = coroutine_running()
 	run_event_handler_in_worker_thread(self, fn, ...)
-	self.overload_thread = cached_overload_runner
+	if not self.threads then return end
+
+	self.active_overload_threads[worker] = nil
+	self.overload_thread = worker
 end
 
 function DynamicPool:_CreateOverLoadThread()
 	return coroutine_create(function()
 		while true do
 			self:_RunOverLoad(coroutine_yield())
+			if not self.threads then return end
 		end
 	end)
 end
@@ -208,7 +313,10 @@ function DynamicPool.New(size_cap : number, idle_time : number): DynamicPool
 	local self = setmetatable({
 		threads = Queue.New(),
 
-		overload_thread = nil,
+		overload_thread = nil, -- one cached idle overload runner
+		active_workers = {}, -- [thread] = job ID; included in current_size
+		active_overload_threads = {}, -- [thread] = job ID; not counted
+		next_job_id = 0,
 		size_cap = size_cap,
 
 
@@ -270,77 +378,53 @@ function DynamicPool:AdjustSizeCap(new_size_cap : number)
 	end
 end
 
--- dips from the pool first then overflows into the overload thread
+-- Dips from the pool first, then uses an overload runner.
 function DynamicPool:SpawnFromPool(fn, ...)
-	if self.size_cap > 0 then
-		local thread = self.threads:Dequeue()
-		if thread then
-			task_spawn(thread, fn, ...)
+	if not self.threads then return nil, nil end
 
+	if self.size_cap > 0 then
+		local worker = self:_TakeIdleWorker()
+		if worker then
 			self:_DetermineThreadPoolUsage()
-			return
+			return self:_StartWorker(worker, false, fn, ...)
 		end
 
 		if self.size_cap > self.current_size then
-			local new_thread = self:_CreateWorker()
-
-			coroutine_resume(new_thread)
-			task_spawn(new_thread, fn, ...)
-
+			worker = self:_CreateWorker()
+			coroutine_resume(worker)
+			-- Count before spawning so reentrant calls see the right size.
 			self.current_size += 1
-			return
+			return self:_StartWorker(worker, false, fn, ...)
 		end
 	end
 
-	if not self.overload_thread then
-		self.overload_thread = self:_CreateOverLoadThread()
-		coroutine_resume(self.overload_thread)
+	local worker = self.overload_thread
+	if not worker or coroutine.status(worker) == "dead" then
+		worker = self:_CreateOverLoadThread()
+		coroutine_resume(worker)
 	end
-
-	task_spawn(self.overload_thread, fn, ...)
-	self.used_overload_thread_time = os_clock()
+	return self:_StartWorker(worker, true, fn, ...)
 end
 
--- uses the overloaded thread first then dips into the pool
--- if the overload thread is busy
+-- Uses the cached overload runner first, then dips into the pool.
 function DynamicPool:Spawn(fn, ...)
-	local runner_thread: thread
+	if not self.threads then return nil, nil end
 
-	if not self.overload_thread then
-		local thread = self.threads:Dequeue()
-
-		if thread then
-			runner_thread = thread
-
-			self:_DetermineThreadPoolUsage()
-		elseif self.size_cap > self.current_size then
-			local new_thread = self:_CreateWorker()
-			coroutine_resume(new_thread)
-
-			self.current_size += 1
-			runner_thread = new_thread
-		else
-			self.overload_thread = self:_CreateOverLoadThread()
-			coroutine_resume(self.overload_thread)
-
-			runner_thread = self.overload_thread
-		end
-	else
-		runner_thread = self.overload_thread   
+	local worker = self.overload_thread
+	if worker and coroutine.status(worker) ~= "dead" then
+		return self:_StartWorker(worker, true, fn, ...)
 	end
-
-	if runner_thread == self.overload_thread then
-		self.used_overload_thread_time = os_clock()
-	end
-
-	task_spawn(runner_thread, fn, ...)
+	self.overload_thread = nil
+	return self:SpawnFromPool(fn, ...)
 end
 
 function DynamicPool:Destroy()
+	if not self.threads then return end
 	self.threads:Destroy()
-
+	-- Preserve the existing behavior: active callbacks may finish after destruction.
+	table_clear(self.active_workers)
+	table_clear(self.active_overload_threads)
 	table_clear(self)
-	setmetatable(self, nil)
 end
 
 local StaticPool = { }
@@ -458,12 +542,20 @@ export type Pool = {
 	protect_threads: boolean
 }
 
-export type DynamicPool = Pool & {
+export type DynamicPool = {
+	Spawn: (self: DynamicPool, fn: (...any) -> (), ...any) -> (thread?, number?),
+	Destroy: (self: DynamicPool) -> (),
+	protect_threads: boolean,
+	active_workers: {[thread]: number},
+	active_overload_threads: {[thread]: number},
 	AdjustSizeCap: (self : DynamicPool, new_size_cap : number) -> (),
 	Reconcile: (self : DynamicPool) -> (),
-	SpawnFromPool: (self : DynamicPool, fn : (...any) -> (), ...any) -> (),
+	SpawnFromPool: (self : DynamicPool, fn : (...any) -> (), ...any) -> (thread?, number?),
 	GetCurrentSize: (self : DynamicPool) -> number,
-	AdjustIdleTime: (self : DynamicPool, new_idle_time : number) -> ()
+	AdjustIdleTime: (self : DynamicPool, new_idle_time : number) -> (),
+	CancelWorker: (self: DynamicPool, worker: thread, expected_job_id: number?) -> (boolean, string?),
+	GetWorkerJobId: (self: DynamicPool, worker: thread) -> number?,
+	ReapDeadWorkers: (self: DynamicPool) -> number,
 }
 
 return Public
